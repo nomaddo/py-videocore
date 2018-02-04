@@ -14,12 +14,15 @@ import sys
 from functools import partial
 from ctypes import Structure, c_ulong, string_at, byref, sizeof
 from struct import pack, unpack
+import types
 import inspect
 import ast
 import numbers
 
 import numpy
 
+from videocore.instr import AddInstr, MulInstr, LoadImmInstr, BranchInstr, SemaInstr, ComposedInstr
+from videocore.checker import check
 
 class _partialmethod(partial):
     'A descriptor for methods behaves like :py:class:`functools.partial.`'
@@ -1164,3 +1167,103 @@ def print_qhex(program, file = sys.stdout, *args, **kwargs):
     assert(len(code) % 8 == 0)
     for c in zip(*[iter(code)]*8):
         print("0x{3:02X}{2:02X}{1:02X}{0:02X}, 0x{7:02X}{6:02X}{5:02X}{4:02X},".format(*c))
+
+#=================================== Sanity checker ===========================
+
+def rev(d):
+    return {v:k for k, v in d.items()}
+
+_SIGNAL_REV = rev(_SIGNAL)
+_ADD_INSN_REV = rev(_ADD_INSN)
+_MUL_INSN_REV = rev(_MUL_INSN)
+_BRANCH_INSN_REV = rev(_BRANCH_INSN)
+_COND_REV = rev(_COND)
+
+class DMulEmitter(MulEmitter):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def _emit(self, op_mul, mul_dst=REGISTERS['null'], mul_opd1=REGISTERS['r0'],
+              mul_opd2=REGISTERS['r0'], rotate=0, pack='nop', **kwargs):
+        insn = MulInstr(_MUL_INSN_REV[op_mul], mul_dst, mul_opd1, mul_opd2, self.sig, self.set_flags, cond_mul)
+        self.asm._emit(insn, increment=self.increment)
+
+class DAddEmitter(AddEmitter):
+    def _emit(self, op_add, dst=REGISTERS['null'], opd1=REGISTERS['r0'],
+              opd2=REGISTERS['r0'], sig='no signal', set_flags=True, **kwargs):
+
+        cond_add = _COND[kwargs.get('cond', 'always')]
+
+        insn = AddInstr(_ADD_INSN_REV[op_add], dst, opd1, opd2, sig, set_flags, cond_add)
+        self.asm._emit(insn)
+        return DMulEmitter(
+            self.asm, op_add=op_add, add_dst=dst, add_opd1=opd1,
+            add_opd2=opd2, cond_add=cond_add, sig=sig, set_flags=set_flags,
+            increment=False)
+
+class DLoadEmitter(LoadEmitter):
+    def _emit(self, *args, **kwargs):
+        reg1 = args[0]
+        if len(args) == 2:
+            reg2 = REGISTERS['null']
+            imm = args[1]
+        else:
+            reg2 = args[1]
+            imm = args[2]
+        insn = LoadImmInstr(reg1, reg2, imm)
+        self.asm._emit(insn)
+
+class DBranchEmitter(BranchEmitter):
+    def _check_error(self, target, pack):
+        if target is None:
+            0
+        elif isinstance(target, Label):
+            0
+        elif isinstance(target, int):
+            0
+        else:
+            raise AssembleError('Invalid branch target: {}'.format(target))
+
+        if pack:
+            raise AssembleError('Packing is not available for link register')
+
+    def _emit(self, cond_br, target=None, reg=None, absolute=False,
+              link=REGISTERS['null']):
+        _check_error(target, pack)
+
+        insn = BranchInstr (cond_br, target, reg, absolute, link)
+        self.asm._emit(insn)
+
+class DSemaEmitter(SemaEmitter):
+    def _check_error(self, sema_id):
+        if not (0 <= sema_id and sema_id <= 15):
+            raise AssembleError('Semaphore id must be in range (0..15)')
+    def _emit(self, sa, sema_id):
+        insn = SemaInstr(sa, sema_id)
+        self.asm._emit(insn)
+
+def checker():
+    sanity_check = Assembler()
+    def _emit(self, insn, increment=True):
+        if increment:
+            self._instructions.append(insn)
+            self._program_counter += 8
+        else:
+            add_insn = self._instructions[-1]
+            self._instructions[-1] = ComposedInstr(add_insn, insn)
+
+    sanity_check._emit = types.MethodType(_emit, sanity_check)
+
+    setattr(sanity_check, '_add', DAddEmitter(sanity_check))
+    setattr(sanity_check, '_mul', DMulEmitter(sanity_check))
+    setattr(sanity_check, '_load', DLoadEmitter(sanity_check))
+    setattr(sanity_check, '_branch', DBranchEmitter(sanity_check))
+    setattr(sanity_check, '_sema', DSemaEmitter(sanity_check))
+
+    return sanity_check
+
+def sanity_check(f, *args, **kwargs):
+    'Sanity check for QPU program'
+    asm = checker()
+    f(asm, *args, **kwargs)
+    return check (asm._instructions)
