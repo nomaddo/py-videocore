@@ -582,6 +582,7 @@ class MulEmitter(Emitter):
     This object receives arguments for Add ALU instruction at its construction
     to implement dual-issue of Add and Mul ALU.
     """
+
     def __init__(self, asm, op_add=_ADD_INSN['nop'], add_dst=REGISTERS['null'],
                  add_opd1=REGISTERS['r0'], add_opd2=REGISTERS['r0'],
                  cond_add=_COND['never'], sig='no signal', set_flags=False,
@@ -1180,11 +1181,9 @@ _BRANCH_INSN_REV = rev(_BRANCH_INSN)
 _COND_REV = rev(_COND)
 
 class DMulEmitter(MulEmitter):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
     def _emit(self, op_mul, mul_dst=REGISTERS['null'], mul_opd1=REGISTERS['r0'],
               mul_opd2=REGISTERS['r0'], rotate=0, pack='nop', **kwargs):
+        cond_mul = _COND[kwargs.get('cond', 'always')]
         insn = MulInstr(_MUL_INSN_REV[op_mul], mul_dst, mul_opd1, mul_opd2, self.sig, self.set_flags, cond_mul)
         self.asm._emit(insn, increment=self.increment)
 
